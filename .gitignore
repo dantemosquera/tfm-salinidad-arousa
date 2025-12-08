@@ -76,7 +76,7 @@ docs/_build/
 target/
 
 # Jupyter Notebook
-.ipynb_checkpoints
+.ipynb_checkpoints/
 
 # IPython
 profile_default/
@@ -205,3 +205,25 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+*.pyc
+
+# --- TFM AROUSA: Datos y Claves Propias ---
+
+# Ignorar la carpeta de datos entera (para no subir GBs a la nube)
+data/
+
+# Por si acaso dejas archivos sueltos fuera de la carpeta data
+*.csv
+*.xlsx
+*.xls
+*.tif
+*.tiff
+*.shp
+*.shx
+*.dbf
+*.prj
+*.geojson
+
+# Carpeta de claves extra (por si la creamos en el futuro)
+keys/
