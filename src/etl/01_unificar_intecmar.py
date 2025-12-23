@@ -26,7 +26,8 @@ Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
 # Coordenadas WGS84 (Decimal Degrees)
 COORDENADAS = {
     'ribeira':   {'lat': 42.551633, 'lon': -8.946442, 'profundidades': ['1_5m']},
-    'cortegada': {'lat': 42.627583, 'lon': -8.782314, 'profundidades': ['1_5m', '3m']}
+    'cortegada': {'lat': 42.627583, 'lon': -8.782314, 'profundidades': ['1_5m', '3m']},
+    'lombos':    {'lat': 42.624998, 'lon': -8.781335, 'profundidades': ['1_5m']}
 }
 
 # Mapeo de códigos INTECMAR a variables
@@ -82,47 +83,40 @@ def extraer_profundidad(col_name):
 
 
 def normalizar_columnas(df):
-    """
-    Versión 4.0 (Definitiva): 
-    Mapeo de datos por semántica/regex.
-    Mapeo de QC ESTRICTAMENTE POSICIONAL (QC de la columna anterior).
-    """
     new_cols = {}
-    cols_originales = list(df.columns) # Lista para acceder por índice
+    cols_originales = list(df.columns) 
     
     for i, col in enumerate(cols_originales):
         c_lower = col.lower()
         
-        # 1. FECHA
+        # FECHA
         if 'data' in c_lower or 'fecha' in c_lower:
             new_cols[col] = 'fecha_hora'
             continue
             
-        # 2. DETECTAR SI ES UNA COLUMNA DE QC (Validación)
-        is_qc = 'validacion' in c_lower or 'validación' in c_lower
+        # QC (Soporta validación y C.V.)
+        is_qc = 'validacion' in c_lower or 'validación' in c_lower or 'c.v.' in c_lower
         
         if is_qc:
-            # LÓGICA POSICIONAL: Miramos la columna anterior (i-1)
             if i > 0:
                 nombre_anterior_orig = cols_originales[i-1]
-                # Si la anterior ya fue renombrada (ej: a 'salinidad_1_5m'), usamos ese nombre
                 if nombre_anterior_orig in new_cols:
                     nombre_base = new_cols[nombre_anterior_orig]
                     new_cols[col] = f"qc_{nombre_base}"
-            continue # Pasamos a la siguiente
+            continue 
 
-        # 3. SI NO ES QC, ES DATO (Salinidad/Temperatura)
-        profundidad = extraer_profundidad(col) # Usamos la v3.1 que ya funciona
+        # DATOS
+        profundidad = extraer_profundidad(col)
+        # FIX: Si no detecta profundidad, asumimos 1_5m (Para Lombos)
+        if not profundidad:
+            profundidad = '1_5m' 
         
-        if profundidad:
-            if 'salinidade' in c_lower or 'salinidad' in c_lower:
-                new_cols[col] = f'salinidad_{profundidad}'
-            elif 'temperatura' in c_lower:
-                new_cols[col] = f'temperatura_{profundidad}'
+        if 'salinidade' in c_lower or 'salinidad' in c_lower:
+            new_cols[col] = f'salinidad_{profundidad}'
+        elif 'temperatura' in c_lower:
+            new_cols[col] = f'temperatura_{profundidad}'
 
-    # Aplicar cambios
-    renamed_df = df.rename(columns=new_cols)
-    return renamed_df
+    return df.rename(columns=new_cols)
 
 
 def validar_rangos(df, station_name):
@@ -142,11 +136,35 @@ def validar_rangos(df, station_name):
 
 
 def procesar_archivo(filepath):
-    """Procesa un archivo CSV individual con manejo robusto de errores"""
+    """Procesa un archivo CSV individual detectando su formato dinámicamente"""
     try:
         filename = os.path.basename(filepath).lower()
         
-        # Detectar estación
+        # 1. DETECCIÓN INTELIGENTE DE FORMATO
+        # Leemos la primera línea para ver a qué nos enfrentamos
+        with open(filepath, 'r', encoding='latin-1') as f:
+            first_line = f.readline()
+        
+        # Configuración por defecto (Estilo Ribeira/Cortegada)
+        read_params = {
+            'sep': ';',
+            'decimal': ',',       # Usan coma
+            'header': 0,          # La primera línea es la cabecera
+            'encoding': 'latin-1',
+            'low_memory': False,
+            'quotechar': '"'      # Importante para limpiar las comillas del CSV
+        }
+        
+        # Si detectamos que es el archivo de Lombos (por el título en la línea 1)
+        if "lombos" in first_line.lower() or "lombos" in filename:
+            logging.info(f"   -> Detectado formato 'Lombos' en {filename}")
+            read_params['header'] = 1      # La cabecera real está en la fila 2 (índice 1)
+            read_params['decimal'] = '.'   # Lombos usa punto para decimales
+        
+        # 2. LEER CSV CON PARÁMETROS ADAPTADOS
+        df = pd.read_csv(filepath, **read_params)
+        
+        # Detectar estación para metadatos
         station_name = None
         for estacion in COORDENADAS.keys():
             if estacion in filename:
@@ -157,55 +175,44 @@ def procesar_archivo(filepath):
             logging.warning(f"Saltando {filename}: No coincide con estaciones conocidas")
             return None
 
-        # Leer CSV
-        df = pd.read_csv(
-            filepath, 
-            sep=';', 
-            decimal=',', 
-            encoding='latin-1',
-            low_memory=False 
-        )
-        
         # Limpiar espacios en nombres de columnas
         df.columns = df.columns.str.strip()
         
-        # Normalizar columnas (Mapeo de nombres)
+        # Normalizar columnas (Tu función ya arreglada)
         df = normalizar_columnas(df)
         
         # Asegurar que TODAS las columnas esperadas existen
         for col in COLUMNAS_ESPERADAS:
             if col not in df.columns:
                 df[col] = pd.NA
-                # logging.debug(f"{station_name}: Añadida columna faltante '{col}'")
         
         # Seleccionar solo columnas de interés
         df = df[COLUMNAS_ESPERADAS]
 
-        # --- CORRECCIÓN CRÍTICA: FORZAR NUMÉRICOS ---
-        # Convertimos explícitamente las columnas de datos a números.
-        # Si hay basura (texto, errores), 'coerce' lo convierte en NaN.
+        # 3. LIMPIEZA DE DATOS NUMÉRICOS (DOBLE CHECK)
+        # Aunque hayamos seteado el decimal, a veces quedan strings sucios.
         cols_numericas = [c for c in df.columns if 'salinidad' in c or 'temperatura' in c]
         for col in cols_numericas:
-            # Primero reemplazamos coma por punto por si se leyó como string
             if df[col].dtype == 'object':
+                # Si sigue siendo texto, forzamos reemplazo de coma por punto por si acaso
                 df[col] = df[col].astype(str).str.replace(',', '.')
-            
-            # Convertimos a número
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        # --------------------------------------------
         
-        # Convertir fecha con manejo de errores
-        len_antes = len(df)
+        # 4. PARSEO DE FECHAS (FLEXIBLE)
+        # Sin formato fijo, con dayfirst=True para formato europeo
         df['fecha_hora'] = pd.to_datetime(
             df['fecha_hora'], 
-            format='%Y/%m/%d %H:%M',
+            dayfirst=True, 
             errors='coerce'
         )
         
-        # Eliminar filas con fechas inválidas (NaN)
+        # Eliminar filas con fechas inválidas
+        len_antes = len(df)
         df = df.dropna(subset=['fecha_hora'])
+        if len(df) == 0 and len_antes > 0:
+            logging.warning(f"⚠️ {filename}: Se perdieron TODAS las filas al parsear fechas. Revisa el formato.")
 
-        # Validar rangos de datos (Ahora sí funcionará porque son números)
+        # Validar rangos
         df = validar_rangos(df, station_name)
         
         # Añadir metadatos geoespaciales
