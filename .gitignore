@@ -224,6 +224,8 @@ data/
 *.dbf
 *.prj
 *.geojson
+*.nc
+*.log
 
 # Carpeta de claves extra (por si la creamos en el futuro)
 keys/
